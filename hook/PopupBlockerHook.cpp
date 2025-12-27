@@ -99,6 +99,49 @@ static bool match_rule(const Rule& r,
     return true;
 }
 
+static bool get_window_info(HWND hwnd,
+    wchar_t* procBase, size_t procCount,
+    wchar_t* cls, size_t clsCount,
+    uint32_t& style, uint32_t& exStyle,
+    int& w, int& h) {
+    if (!hwnd) return false;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (!get_process_basename(pid, procBase, procCount)) return false;
+
+    if (!GetClassNameW(hwnd, cls, (int)clsCount)) return false;
+
+    style = (uint32_t)GetWindowLongPtrW(hwnd, GWL_STYLE);
+    exStyle = (uint32_t)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+
+    RECT rc{};
+    if (GetWindowRect(hwnd, &rc)) {
+        w = rc.right - rc.left;
+        h = rc.bottom - rc.top;
+    }
+    else {
+        w = 0;
+        h = 0;
+    }
+
+    return true;
+}
+
+static void apply_action(HWND hwnd, Action action) {
+    switch (action) {
+    case Action::Hide:
+        ShowWindow(hwnd, SW_HIDE);
+        break;
+    case Action::RemoveTopmost:
+        SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        break;
+    default:
+        break;
+    }
+}
+
 static LRESULT CALLBACK CbtProc(int code, WPARAM wParam, LPARAM lParam) {
     if (code == HCBT_CREATEWND) {
         InitOnceExecuteOnce(&g_initOnce, InitShared, nullptr, nullptr);
@@ -151,6 +194,39 @@ static LRESULT CALLBACK CbtProc(int code, WPARAM wParam, LPARAM lParam) {
                 break;
             }
             break; 
+        }
+    }
+    else if (code == HCBT_ACTIVATE) {
+        InitOnceExecuteOnce(&g_initOnce, InitShared, nullptr, nullptr);
+
+        SharedRules snap{};
+        if (!read_snapshot(snap)) return CallNextHookEx(g_hHook, code, wParam, lParam);
+        if (snap.paused) return CallNextHookEx(g_hHook, code, wParam, lParam);
+        if (snap.ruleCount == 0) return CallNextHookEx(g_hHook, code, wParam, lParam);
+
+        HWND hwnd = (HWND)wParam;
+        if (!hwnd) return CallNextHookEx(g_hHook, code, wParam, lParam);
+
+        uint32_t style = 0;
+        uint32_t exStyle = 0;
+        int w = 0;
+        int h = 0;
+        wchar_t procBase[64]{};
+        wchar_t cls[64]{};
+        if (!get_window_info(hwnd, procBase, _countof(procBase), cls, _countof(cls),
+                style, exStyle, w, h)) {
+            return CallNextHookEx(g_hHook, code, wParam, lParam);
+        }
+
+        if ((style & WS_CHILD) != 0) return CallNextHookEx(g_hHook, code, wParam, lParam);
+
+        for (uint32_t i = 0; i < snap.ruleCount; ++i) {
+            const Rule& r = snap.rules[i];
+            if (!match_rule(r, procBase, cls, style, exStyle, w, h)) continue;
+            if (r.action == Action::Hide || r.action == Action::RemoveTopmost) {
+                apply_action(hwnd, r.action);
+            }
+            break;
         }
     }
 
